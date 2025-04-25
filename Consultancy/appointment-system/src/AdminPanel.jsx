@@ -71,17 +71,13 @@ const AdminPanel = () => {
     <div className="min-h-screen flex flex-col bg-gray-100">
       
       {isAdminLoggedIn ? (
-        // Admin Dashboard After Login
         <div className="flex-1 flex flex-col">
-          {/* Admin Navbar */}
-          <AdminNavbar />
 
           {/* Main Content */}
-          <div className="flex-1 p-8 bg-white rounded-lg shadow-lg">
             {currentPath === '/admin' && <Home />}
-            {currentPath === '/admin/doctors' && <DoctorsList />}
-            {currentPath === '/admin/appointments' && <Appointments />}
-          </div>
+            {currentPath === '/admindoctors' && <DoctorsList />}
+            {currentPath === '/adminappointments' && <Appointments />}
+          
         </div>
       ) : (
         // Login Form

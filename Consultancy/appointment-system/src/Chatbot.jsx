@@ -1,4 +1,3 @@
-// src/Chatbot.jsx
 import React, { useState, useRef, useEffect } from 'react';
 
 const Chatbot = () => {
@@ -8,6 +7,8 @@ const Chatbot = () => {
   ]);
   const [inputText, setInputText] = useState('');
   const [isListening, setIsListening] = useState(false);
+  const [isBotTyping, setIsBotTyping] = useState(false);
+  const [conversationId, setConversationId] = useState(Date.now().toString());
   const messagesEndRef = useRef(null);
   const recognition = useRef(null);
 
@@ -51,7 +52,7 @@ const Chatbot = () => {
     setIsOpen(!isOpen);
   };
 
-  const sendMessage = (e) => {
+  const sendMessage = async (e) => {
     e.preventDefault();
     
     if (inputText.trim() === '') return;
@@ -60,33 +61,39 @@ const Chatbot = () => {
     const userMessage = { text: inputText, sender: 'user' };
     setMessages(prev => [...prev, userMessage]);
     setInputText('');
+    setIsBotTyping(true);
     
-    // Simulate bot response after a short delay
-    setTimeout(() => {
-      handleBotResponse(inputText);
-    }, 600);
-  };
-
-  const handleBotResponse = (userText) => {
-    // Simple responses based on keywords - replace with actual backend integration
-    let botResponse = "I'm sorry, I don't have information about that yet. Please contact our support team for more assistance.";
-    
-    const text = userText.toLowerCase();
-    
-    if (text.includes('appointment') || text.includes('book') || text.includes('schedule')) {
-      botResponse = "To book an appointment, please select a doctor from the list and click the appointment button. You can also call our reception at 123-456-7890.";
-    } else if (text.includes('doctor') || text.includes('specialist')) {
-      botResponse = "We have specialists in Oncology, Neurology, Pulmonology, and Cardiology. You can view all doctors in the list above.";
-    } else if (text.includes('timing') || text.includes('hours') || text.includes('available')) {
-      botResponse = "Each doctor has different availability hours. Please check the availability section in the doctor's information card.";
-    } else if (text.includes('hello') || text.includes('hi') || text.includes('hey')) {
-      botResponse = "Hello! How can I assist you with your healthcare needs today?";
-    } else if (text.includes('thank')) {
-      botResponse = "You're welcome! Is there anything else I can help you with?";
+    try {
+      const response = await fetch('http://localhost:5000/chat', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          question: inputText,
+          conversation_id: conversationId
+        }),
+      });
+      
+      const data = await response.json();
+      
+      if (!response.ok) {
+        throw new Error(data.message || 'Failed to get response');
+      }
+      
+      // Add bot response
+      const botMessage = { text: data.response, sender: 'bot' };
+      setMessages(prev => [...prev, botMessage]);
+      
+    } catch (err) {
+      const errorMessage = { 
+        text: "Sorry, I'm having trouble responding. Please try again later.", 
+        sender: 'bot' 
+      };
+      setMessages(prev => [...prev, errorMessage]);
+    } finally {
+      setIsBotTyping(false);
     }
-    
-    const botMessage = { text: botResponse, sender: 'bot' };
-    setMessages(prev => [...prev, botMessage]);
   };
 
   const startListening = () => {
@@ -150,6 +157,17 @@ const Chatbot = () => {
                 </div>
               </div>
             ))}
+            {isBotTyping && (
+              <div className="text-left mb-3">
+                <div className="inline-block p-2 rounded-lg bg-gray-100 text-gray-800">
+                  <div className="flex space-x-1">
+                    <div className="w-2 h-2 rounded-full bg-gray-500 animate-bounce"></div>
+                    <div className="w-2 h-2 rounded-full bg-gray-500 animate-bounce" style={{ animationDelay: '0.2s' }}></div>
+                    <div className="w-2 h-2 rounded-full bg-gray-500 animate-bounce" style={{ animationDelay: '0.4s' }}></div>
+                  </div>
+                </div>
+              </div>
+            )}
             <div ref={messagesEndRef} />
           </div>
 
@@ -161,12 +179,14 @@ const Chatbot = () => {
               onChange={(e) => setInputText(e.target.value)}
               placeholder="Type your message..."
               className="flex-1 p-2 border border-gray-300 rounded-l-md focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              disabled={isBotTyping}
             />
             
             {/* Voice Button */}
             <button 
               type="button"
               onClick={isListening ? stopListening : startListening}
+              disabled={isBotTyping}
               className={`p-2 ${isListening ? 'bg-red-500' : 'bg-gray-200'} text-white rounded-none`}
             >
               <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -178,6 +198,7 @@ const Chatbot = () => {
             <button 
               type="submit" 
               className="bg-indigo-600 text-white p-2 rounded-r-md"
+              disabled={isBotTyping || inputText.trim() === ''}
             >
               <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8" />

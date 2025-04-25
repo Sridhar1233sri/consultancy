@@ -14,6 +14,7 @@ uri = "mongodb://localhost:27017/consultancy"
 client = MongoClient(uri)
 db = client['Consultancy']
 users_collection = db['users']
+doctors_collection = db['doctors']
 
 @app.route('/')
 def home():
@@ -81,6 +82,68 @@ def login():
     except Exception as e:
         print("Login error:", str(e))
         return jsonify({"success": False, "message": "An error occurred during login"}), 500
+    
+@app.route('/doctors', methods=['GET', 'POST', 'DELETE'])
+def doctors():
+    try:
+        if request.method == 'POST':
+            data = request.get_json()
+            
+            # Basic validation
+            required_fields = ['name', 'hospital', 'speciality']
+            if not all(field in data for field in required_fields):
+                return jsonify({"success": False, "message": "Missing required fields"}), 400
+            
+            # Get the next doctor ID
+            last_doctor = doctors_collection.find_one(sort=[("id", -1)])
+            last_id = int(last_doctor['id'][1:]) if last_doctor else 0
+            new_id = f"D{last_id + 1}"
+            
+            # Insert new doctor
+            doctor_data = {
+                "id": new_id,
+                "name": data['name'],
+                "hospital": data['hospital'],
+                "speciality": data['speciality'],
+                "availability": data.get('availability', {}),
+                "profilePhoto": data.get('profilePhoto')
+            }
+            
+            result = doctors_collection.insert_one(doctor_data)
+            return jsonify({
+                "success": True,
+                "message": "Doctor added successfully",
+                "id": new_id
+            }), 201
+        
+        elif request.method == 'GET':
+            # Get all doctors
+            doctors = list(doctors_collection.find({}, {'_id': 0}))
+            return jsonify({
+                "success": True,
+                "doctors": doctors
+            }), 200
+            
+        elif request.method == 'DELETE':
+            doctor_id = request.args.get('id')
+            if not doctor_id:
+                return jsonify({"success": False, "message": "Doctor ID is required"}), 400
+                
+            result = doctors_collection.delete_one({"id": doctor_id})
+            if result.deleted_count == 0:
+                return jsonify({"success": False, "message": "Doctor not found"}), 404
+                
+            return jsonify({
+                "success": True,
+                "message": "Doctor deleted successfully"
+            }), 200
+            
+    except PyMongoError as e:
+        print("Database error:", str(e))
+        return jsonify({"success": False, "message": "Database error occurred"}), 500
+    except Exception as e:
+        print("Error:", str(e))
+        return jsonify({"success": False, "message": "An error occurred"}), 500
 
 if __name__ == '__main__':
     app.run(debug=True)

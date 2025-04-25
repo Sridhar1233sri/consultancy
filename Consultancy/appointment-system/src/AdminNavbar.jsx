@@ -7,7 +7,7 @@ const AdminNavbar = () => {
     <nav className="bg-indigo-600 text-white py-4 px-6 flex justify-between items-center">
       {/* Left Side - Navigation Links */}
       <div className="flex space-x-6">
-        <Link to="/admin" className="hover:text-indigo-200 transition duration-300">
+        <Link to="/home" className="hover:text-indigo-200 transition duration-300">
           Home
         </Link>
         <Link to="/admindoctorlist" className="hover:text-indigo-200 transition duration-300">
