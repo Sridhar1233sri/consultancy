@@ -1,4 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
+import axios from 'axios';
 
 const Chatbot = () => {
   const [isOpen, setIsOpen] = useState(false);
@@ -9,41 +10,20 @@ const Chatbot = () => {
   const [isListening, setIsListening] = useState(false);
   const [isBotTyping, setIsBotTyping] = useState(false);
   const [conversationId, setConversationId] = useState(Date.now().toString());
+  const [audioChunks, setAudioChunks] = useState([]);
+  const mediaRecorderRef = useRef(null);
   const messagesEndRef = useRef(null);
-  const recognition = useRef(null);
 
-  // Initialize speech recognition
+  // Initialize audio recording
   useEffect(() => {
-    if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
-      const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-      recognition.current = new SpeechRecognition();
-      recognition.current.continuous = false;
-      recognition.current.interimResults = false;
-      recognition.current.lang = 'en-US';
-
-      recognition.current.onresult = (event) => {
-        const transcript = event.results[0][0].transcript;
-        setInputText(transcript);
-      };
-
-      recognition.current.onend = () => {
-        setIsListening(false);
-      };
-
-      recognition.current.onerror = (event) => {
-        console.error("Speech recognition error", event.error);
-        setIsListening(false);
-      };
-    }
-
     return () => {
-      if (recognition.current) {
-        recognition.current.abort();
+      if (mediaRecorderRef.current) {
+        mediaRecorderRef.current.stream.getTracks().forEach(track => track.stop());
       }
     };
   }, []);
 
-  // Scroll to the bottom of messages
+  // Scroll to bottom
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
@@ -52,65 +32,105 @@ const Chatbot = () => {
     setIsOpen(!isOpen);
   };
 
-  const sendMessage = async (e) => {
+  const startRecording = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      mediaRecorderRef.current = new MediaRecorder(stream);
+      const chunks = [];
+      
+      mediaRecorderRef.current.ondataavailable = (e) => {
+        chunks.push(e.data);
+      };
+      
+      mediaRecorderRef.current.onstop = async () => {
+        const audioBlob = new Blob(chunks, { type: 'audio/wav' });
+        await sendAudioMessage(audioBlob);
+        setAudioChunks([]);
+      };
+      
+      mediaRecorderRef.current.start();
+      setIsListening(true);
+    } catch (err) {
+      console.error("Error starting recording:", err);
+      addErrorMessage("Couldn't access microphone. Please check permissions.");
+    }
+  };
+
+  const stopRecording = () => {
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+      mediaRecorderRef.current.stop();
+      setIsListening(false);
+      mediaRecorderRef.current.stream.getTracks().forEach(track => track.stop());
+    }
+  };
+
+  const sendAudioMessage = async (audioBlob) => {
+    setIsBotTyping(true);
+    
+    try {
+      const formData = new FormData();
+      formData.append('audio', audioBlob);
+      formData.append('conversation_id', conversationId);
+      
+      const response = await axios.post('http://localhost:5000/chat', formData, {
+        headers: {
+          'Content-Type': 'multipart/form-data',
+        },
+      });
+      
+      if (response.data.success) {
+        setMessages(prev => [
+          ...prev,
+          { text: response.data.response, sender: 'bot' }
+        ]);
+      } else {
+        addErrorMessage(response.data.message || "Failed to get response");
+      }
+    } catch (err) {
+      console.error("Error sending audio:", err);
+      addErrorMessage("Sorry, I couldn't process your audio. Please try again.");
+    } finally {
+      setIsBotTyping(false);
+    }
+  };
+
+  const sendTextMessage = async (e) => {
     e.preventDefault();
     
     if (inputText.trim() === '') return;
     
-    // Add user message
     const userMessage = { text: inputText, sender: 'user' };
     setMessages(prev => [...prev, userMessage]);
     setInputText('');
     setIsBotTyping(true);
     
     try {
-      const response = await fetch('http://localhost:5000/chat', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          question: inputText,
-          conversation_id: conversationId
-        }),
+      const response = await axios.post('http://localhost:5000/chat', {
+        question: inputText,
+        conversation_id: conversationId
       });
       
-      const data = await response.json();
-      
-      if (!response.ok) {
-        throw new Error(data.message || 'Failed to get response');
+      if (response.data.success) {
+        setMessages(prev => [
+          ...prev,
+          { text: response.data.response, sender: 'bot' }
+        ]);
+      } else {
+        addErrorMessage(response.data.message || "Failed to get response");
       }
-      
-      // Add bot response
-      const botMessage = { text: data.response, sender: 'bot' };
-      setMessages(prev => [...prev, botMessage]);
-      
     } catch (err) {
-      const errorMessage = { 
-        text: "Sorry, I'm having trouble responding. Please try again later.", 
-        sender: 'bot' 
-      };
-      setMessages(prev => [...prev, errorMessage]);
+      console.error("Error sending message:", err);
+      addErrorMessage("Sorry, I'm having trouble responding. Please try again later.");
     } finally {
       setIsBotTyping(false);
     }
   };
 
-  const startListening = () => {
-    if (!recognition.current) {
-      alert("Speech recognition is not supported in your browser.");
-      return;
-    }
-    
-    setIsListening(true);
-    recognition.current.start();
-  };
-
-  const stopListening = () => {
-    if (!recognition.current) return;
-    
-    recognition.current.stop();
-    setIsListening(false);
+  const addErrorMessage = (message) => {
+    setMessages(prev => [
+      ...prev,
+      { text: message, sender: 'bot', isError: true }
+    ]);
   };
 
   return (
@@ -133,7 +153,7 @@ const Chatbot = () => {
 
       {/* Chatbot Window */}
       {isOpen && (
-        <div className="absolute bottom-16 right-0 bg-white rounded-lg shadow-xl w-80 md:w-96 max-h-96 flex flex-col">
+        <div className="absolute bottom-16 right-0 bg-white rounded-lg shadow-xl w-80 md:w-96 max-h-100 flex flex-col">
           {/* Header */}
           <div className="bg-indigo-600 text-white p-4 rounded-t-lg flex justify-between items-center">
             <h3 className="font-medium">Healthcare Assistant</h3>
@@ -151,7 +171,9 @@ const Chatbot = () => {
                 <div className={`inline-block p-2 rounded-lg max-w-3/4 ${
                   message.sender === 'user' 
                     ? 'bg-indigo-100 text-indigo-800' 
-                    : 'bg-gray-100 text-gray-800'
+                    : message.isError
+                      ? 'bg-red-100 text-red-800'
+                      : 'bg-gray-100 text-gray-800'
                 }`}>
                   {message.text}
                 </div>
@@ -172,7 +194,7 @@ const Chatbot = () => {
           </div>
 
           {/* Input */}
-          <form onSubmit={sendMessage} className="p-4 border-t border-gray-200 flex items-center">
+          <form onSubmit={sendTextMessage} className="p-4 border-t border-gray-200 flex items-center">
             <input
               type="text"
               value={inputText}
@@ -185,7 +207,7 @@ const Chatbot = () => {
             {/* Voice Button */}
             <button 
               type="button"
-              onClick={isListening ? stopListening : startListening}
+              onClick={isListening ? stopRecording : startRecording}
               disabled={isBotTyping}
               className={`p-2 ${isListening ? 'bg-red-500' : 'bg-gray-200'} text-white rounded-none`}
             >
