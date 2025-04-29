@@ -10,12 +10,10 @@ from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_groq import ChatGroq
 from langchain.chains import ConversationChain
 from langchain.memory import ConversationBufferWindowMemory
-import requests
-from io import BytesIO
 import tempfile
 import json
 from dotenv import load_dotenv
-
+import datetime
 # Load environment variables from .env file
 load_dotenv()
 app = Flask(__name__)
@@ -32,30 +30,37 @@ conversations_collection = db['conversations']
 # Groq client
 groq_client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
 
-def transcribe_audio(audio_data):
-    """Transcribe audio using Whisper-large-v3-turbo model via Groq API"""
+def transcribe_audio(audio_bytes):
+    """Transcribe audio using Whisper via Groq API"""
     try:
-        # Create a temporary file to store the audio data
+        # Create a temporary file
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_audio:
-            temp_audio.write(audio_data)
+            temp_audio.write(audio_bytes)
             temp_audio_path = temp_audio.name
         
         # Transcribe using Groq API
-        with open(temp_audio_path, "rb") as file:
+        with open(temp_audio_path, "rb") as audio_file:
             transcription = groq_client.audio.transcriptions.create(
-                file=(temp_audio_path, file.read()),
+                file=audio_file,
                 model="whisper-large-v3-turbo",
-                response_format="text",
+                response_format="text"
             )
         
-        # Clean up the temporary file
+        # Clean up
         os.unlink(temp_audio_path)
         
-        return transcription.text
-    
+        # Handle different response formats
+        if isinstance(transcription, str):
+            return transcription.strip()
+        elif hasattr(transcription, 'text'):
+            return transcription.text.strip()
+        else:
+            print(f"Unexpected transcription format: {type(transcription)}")
+            return None
+            
     except Exception as e:
-        print(f"Error in audio transcription: {str(e)}")
-        return "Could not transcribe audio. Please try again."
+        print(f"Transcription error: {str(e)}")
+        return None
 
 def classify_intent(text):
     """Classify user intent using Mistral-7b model via Groq API"""
@@ -221,28 +226,128 @@ def generate_general_response(question, history):
 @app.route('/chat', methods=['POST'])
 def chat():
     try:
-        data = request.get_json()
-        question = data.get('question')
-        conversation_id = data.get('conversation_id')
-        audio_data = data.get('audio_data')
-        
-        if audio_data:
-            import base64
-            audio_bytes = base64.b64decode(audio_data)
-            question = transcribe_audio(audio_bytes)
-        
+        # Check content type and handle accordingly
+        if request.content_type.startswith('multipart/form-data'):
+            # Handle audio upload
+            if 'audio' not in request.files:
+                return jsonify({"success": False, "message": "No audio file provided"}), 400
+            
+            audio_file = request.files['audio']
+            if audio_file.filename == '':
+                return jsonify({"success": False, "message": "Empty audio file"}), 400
+
+            # Read audio data into memory
+            audio_bytes = audio_file.read()
+            if not audio_bytes:
+                return jsonify({"success": False, "message": "Could not read audio data"}), 400
+
+            # Transcribe audio
+            try:
+                question = transcribe_audio(audio_bytes)
+                if not question:
+                    return jsonify({"success": False, "message": "Audio transcription failed"}), 400
+            except Exception as e:
+                print(f"Transcription error: {str(e)}")
+                return jsonify({"success": False, "message": "Error transcribing audio"}), 500
+
+            conversation_id = request.form.get('conversation_id')
+            
+        elif request.content_type == 'application/json':
+            # Handle JSON request
+            data = request.get_json()
+            question = data.get('question')
+            conversation_id = data.get('conversation_id')
+        else:
+            return jsonify({"success": False, "message": "Unsupported content type"}), 415
+
+        # Validate required fields
         if not question:
             return jsonify({"success": False, "message": "No question provided"}), 400
+        if not conversation_id:
+            return jsonify({"success": False, "message": "Conversation ID is required"}), 400
+
+        # Retrieve or create conversation (using find_one_and_update for atomic operation)
+        conversation = conversations_collection.find_one_and_update(
+            {"conversation_id": conversation_id},
+            {
+                "$setOnInsert": {
+                    "conversation_id": conversation_id,
+                    "created_at": datetime.datetime.utcnow()
+                },
+                "$set": {
+                    "updated_at": datetime.datetime.utcnow()
+                }
+            },
+            upsert=True,
+            return_document=True
+        )
+
+        # Get existing history or initialize empty array
+        history = conversation.get('history', [])
+
+        # Classify intent
+        intent = classify_intent(question)
         
+        # Generate appropriate response
+        if intent == "doctor_query":
+            doctors = get_doctor_data(question)
+            response = generate_doctor_response(question, doctors)
+        else:
+            # Format history for context (last 4 messages)
+            history_context = "\n".join(
+                [f"{msg['role']}: {msg['content']}" 
+                 for msg in history[-4:]] if history else []
+            )
+            response = generate_general_response(question, history_context)
+
+        # Prepare new messages to add
+        new_messages = [
+            {"role": "user", "content": question, "timestamp": datetime.datetime.utcnow()},
+            {"role": "assistant", "content": response, "timestamp": datetime.datetime.utcnow()}
+        ]
+
+        # Update conversation history (using $push with $each)
+        conversations_collection.update_one(
+            {"conversation_id": conversation_id},
+            {
+                "$push": {
+                    "history": {
+                        "$each": new_messages,
+                        "$slice": -20  # Keep only last 20 messages to prevent unbounded growth
+                    }
+                },
+                "$set": {
+                    "updated_at": datetime.datetime.utcnow()
+                }
+            }
+        )
+
+        return jsonify({
+            "success": True,
+            "response": response,
+            "conversation_id": conversation_id,
+            "intent": intent
+        })
+
+    except PyMongoError as e:
+        print(f"MongoDB error: {str(e)}")
+        return jsonify({"success": False, "message": "Database error occurred"}), 500
+    except Exception as e:
+        print(f"Unexpected error: {str(e)}")
+        return jsonify({"success": False, "message": "An unexpected error occurred"}), 500
+
+def process_chat_message(question, conversation_id):
+    try:
         # Retrieve or create conversation
         conversation = conversations_collection.find_one({"conversation_id": conversation_id})
         if not conversation:
             conversation = {
                 "conversation_id": conversation_id,
-                "history": []
+                "history": [],
+                "created_at": datetime.datetime.utcnow()
             }
             conversations_collection.insert_one(conversation)
-        
+
         # Classify intent
         intent = classify_intent(question)
         
@@ -253,26 +358,41 @@ def chat():
         else:
             history = "\n".join([f"{msg['role']}: {msg['content']}" for msg in conversation['history'][-4:]])
             response = generate_general_response(question, history)
-        
+
         # Update conversation history
-        conversation["history"].extend([
-            {"role": "user", "content": question},
-            {"role": "assistant", "content": response}
-        ])
+        update_data = {
+            "$push": {
+                "history": {
+                    "$each": [
+                        {"role": "user", "content": question, "timestamp": datetime.datetime.utcnow()},
+                        {"role": "assistant", "content": response, "timestamp": datetime.datetime.utcnow()}
+                    ]
+                }
+            },
+            "$set": {"updated_at": datetime.datetime.utcnow()}
+        }
         
         conversations_collection.update_one(
             {"conversation_id": conversation_id},
-            {"$set": {"history": conversation["history"]}}
+            update_data
         )
-        
+
         return jsonify({
             "success": True,
             "response": response,
-            "conversation_id": conversation_id
-        }), 200
+            "conversation_id": conversation_id,
+            "intent": intent
+        })
+
+    except PyMongoError as e:
+        print(f"MongoDB error: {str(e)}")
+        return jsonify({
+            "success": False,
+            "message": "Database error occurred"
+        }), 500
         
     except Exception as e:
-        print("Chat error:", str(e))
+        print(f"Chat processing error: {str(e)}")
         return jsonify({
             "success": False,
             "message": "An error occurred during chat processing"

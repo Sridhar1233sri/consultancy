@@ -69,7 +69,7 @@ const Chatbot = () => {
     
     try {
       const formData = new FormData();
-      formData.append('audio', audioBlob);
+      formData.append('audio', audioBlob, 'recording.wav');
       formData.append('conversation_id', conversationId);
       
       const response = await axios.post('http://localhost:5000/chat', formData, {
