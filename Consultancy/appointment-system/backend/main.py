@@ -528,6 +528,187 @@ def doctors():
         print("Error:", str(e))
         return jsonify({"success": False, "message": "An error occurred"}), 500
     
+appointments_collection = db['appointments']
+# Add these imports at the top of your Flask app
+from bson import ObjectId
+from datetime import datetime, timedelta
+@app.route('/appointments', methods=['GET', 'POST'])
+def handle_appointments():
+    if request.method == 'GET':
+        email = request.args.get('email')
+        if not email:
+            return jsonify({"success": False, "message": "Email parameter is required"}), 400
+        
+        appointments = list(appointments_collection.find({"patientEmail": email}))
+        # Convert ObjectId to string and remove sensitive fields
+        for appt in appointments:
+            appt['_id'] = str(appt['_id'])
+            # Don't remove patientEmail here since we're filtering by it
+            # appt.pop('patientEmail', None)
+        
+        return jsonify({"success": True, "appointments": appointments}), 200
+    
+    elif request.method == 'POST':
+        data = request.get_json()
+        required_fields = [
+            'patientEmail', 'patientName', 'doctorId', 'doctorName',
+            'doctorSpeciality', 'doctorHospital', 'date', 'time', 'issue'
+        ]
+        
+        if not all(field in data for field in required_fields):
+            return jsonify({"success": False, "message": "Missing required fields"}), 400
+        
+        try:
+            # Parse the input date and time
+            appointment_date = datetime.strptime(data['date'], '%Y-%m-%d').date()
+            if appointment_date < datetime.today().date():
+                return jsonify({"success": False, "message": "Appointment date cannot be in the past"}), 400
+            
+            # Parse the time and calculate end time (1 hour later)
+            start_time = datetime.strptime(data['time'], '%H:%M').time()
+            start_datetime = datetime.combine(appointment_date, start_time)
+            end_datetime = start_datetime + timedelta(hours=1)
+            
+            # Check if doctor exists
+            doctor = doctors_collection.find_one({"id": data['doctorId']})
+            if not doctor:
+                return jsonify({"success": False, "message": "Doctor not found"}), 404
+            
+            # Check for overlapping appointments (enhanced validation)
+            existing = appointments_collection.find_one({
+    "doctorId": data['doctorId'],
+    "date": data['date'],
+    "$expr": {
+        "$and": [
+            {
+                "$lt": [
+                    {"$dateFromString": {
+                        "dateString": {"$concat": ["$date", "T", "$time", ":00"]},
+                        "format": "%Y-%m-%dT%H:%M:%S"
+                    }},
+                    end_datetime
+                ]
+            },
+            {
+                "$gt": [
+                    {
+                        "$add": [
+                            {"$dateFromString": {
+                                "dateString": {"$concat": ["$date", "T", "$time", ":00"]},
+                                "format": "%Y-%m-%dT%H:%M:%S"
+                            }},
+                            3600000  # Add 1 hour in milliseconds
+                        ]
+                    },
+                    start_datetime
+                ]
+            }
+        ]
+    }
+})
 
+            
+            if existing:
+                return jsonify({
+                    "success": False, 
+                    "message": "This time slot is already booked or overlaps with another appointment"
+                }), 400
+            
+            appointment_data = {
+                "patientEmail": data['patientEmail'],
+                "patientName": data['patientName'],
+                "doctorId": data['doctorId'],
+                "doctorName": data['doctorName'],
+                "doctorSpeciality": data['doctorSpeciality'],
+                "doctorHospital": data['doctorHospital'],
+                "date": data['date'],
+                "time": data['time'],
+                "issue": data['issue'],
+                "startDateTime": start_datetime,
+                "endDateTime": end_datetime,
+                "createdAt": datetime.utcnow()
+            }
+            
+            result = appointments_collection.insert_one(appointment_data)
+            return jsonify({
+                "success": True,
+                "message": "Appointment booked successfully",
+                "id": str(result.inserted_id)
+            }), 201
+
+        except ValueError as e:
+            return jsonify({"success": False, "message": f"Invalid date/time format: {str(e)}"}), 400
+        except Exception as e:
+            print(f"Error creating appointment: {str(e)}")
+            return jsonify({"success": False, "message": "An error occurred while booking appointment"}), 500
+
+@app.route('/appointments/<appointment_id>', methods=['DELETE'])
+def delete_appointment(appointment_id):
+    try:
+        obj_id = ObjectId(appointment_id)
+    except:
+        return jsonify({"success": False, "message": "Invalid appointment ID"}), 400
+    
+    result = appointments_collection.delete_one({"_id": obj_id})
+    if result.deleted_count == 0:
+        return jsonify({"success": False, "message": "Appointment not found"}), 404
+    
+    return jsonify({"success": True, "message": "Appointment cancelled successfully"}), 200
+
+@app.route('/adminappointments', methods=['GET'])
+def get_all_appointments():
+    try:
+        # Get all appointments (admin view)
+        appointments = list(appointments_collection.find({}))
+        
+        # Convert ObjectId to string and format for response
+        for appt in appointments:
+            appt['_id'] = str(appt['_id'])
+        
+        return jsonify({
+            "success": True,
+            "appointments": appointments
+        }), 200
+        
+    except PyMongoError as e:
+        print("Database error:", str(e))
+        return jsonify({"success": False, "message": "Database error occurred"}), 500
+    except Exception as e:
+        print("Error:", str(e))
+        return jsonify({"success": False, "message": "An error occurred"}), 500
+    
+@app.route('/appointments/availability', methods=['GET'])
+def check_availability():
+    doctor_id = request.args.get('doctorId')
+    date = request.args.get('date')
+    
+    if not doctor_id or not date:
+        return jsonify({"success": False, "message": "Doctor ID and date are required"}), 400
+    
+    try:
+        # Get all appointments for this doctor on this date
+        appointments = list(appointments_collection.find({
+            "doctorId": doctor_id,
+            "date": date
+        }))
+        
+        # Generate all possible slots (9am to 5pm)
+        all_slots = [f"{hour:02d}:00" for hour in range(9, 18)]
+        
+        # Get booked slots
+        booked_slots = [appt['time'] for appt in appointments]
+        
+        # Calculate available slots
+        available_slots = [slot for slot in all_slots if slot not in booked_slots]
+        
+        return jsonify({
+            "success": True,
+            "availableSlots": available_slots
+        })
+        
+    except Exception as e:
+        print(f"Error checking availability: {str(e)}")
+        return jsonify({"success": False, "message": "Error checking availability"}), 500
+    
 if __name__ == '__main__':
     app.run(debug=True)

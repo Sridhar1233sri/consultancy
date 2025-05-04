@@ -77,7 +77,7 @@ const AdminPanel = () => {
             {currentPath === '/admin' && <Home />}
             {currentPath === '/admindoctors' && <DoctorsList />}
             {currentPath === '/adminappointments' && <Appointments />}
-          
+            
         </div>
       ) : (
         // Login Form

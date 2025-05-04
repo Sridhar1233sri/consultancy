@@ -57,7 +57,7 @@ const Register = () => {
           login({ email: formData.email, role: role });
 
           setIsRegistered(true);
-          navigate('/');
+          navigate('/user-panel');
         } else {
           alert(response.data.message);
         }

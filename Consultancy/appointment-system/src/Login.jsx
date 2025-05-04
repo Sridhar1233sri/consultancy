@@ -43,7 +43,7 @@ const Login = () => {
           console.log('Login successful:', data);
           // Store user data in context
           login({ email: formData.email, role: data.role }); // Assuming the backend returns the user's role
-          navigate('/'); // Navigate to the homepage after successful login
+          navigate('/user-panel'); // Navigate to the homepage after successful login
         } else {
           console.log('Login error:', data.error);
         }
