@@ -13,7 +13,8 @@ from langchain.memory import ConversationBufferWindowMemory
 import tempfile
 import json
 from dotenv import load_dotenv
-import datetime
+from bson import ObjectId
+from datetime import datetime, timedelta
 # Load environment variables from .env file
 load_dotenv()
 app = Flask(__name__)
@@ -272,10 +273,10 @@ def chat():
             {
                 "$setOnInsert": {
                     "conversation_id": conversation_id,
-                    "created_at": datetime.datetime.utcnow()
+                    "created_at": datetime.utcnow()
                 },
                 "$set": {
-                    "updated_at": datetime.datetime.utcnow()
+                    "updated_at": datetime.utcnow()
                 }
             },
             upsert=True,
@@ -302,8 +303,8 @@ def chat():
 
         # Prepare new messages to add
         new_messages = [
-            {"role": "user", "content": question, "timestamp": datetime.datetime.utcnow()},
-            {"role": "assistant", "content": response, "timestamp": datetime.datetime.utcnow()}
+            {"role": "user", "content": question, "timestamp": datetime.utcnow()},
+            {"role": "assistant", "content": response, "timestamp": datetime.utcnow()}
         ]
 
         # Update conversation history (using $push with $each)
@@ -317,7 +318,7 @@ def chat():
                     }
                 },
                 "$set": {
-                    "updated_at": datetime.datetime.utcnow()
+                    "updated_at": datetime.utcnow()
                 }
             }
         )
@@ -344,7 +345,7 @@ def process_chat_message(question, conversation_id):
             conversation = {
                 "conversation_id": conversation_id,
                 "history": [],
-                "created_at": datetime.datetime.utcnow()
+                "created_at": datetime.utcnow()
             }
             conversations_collection.insert_one(conversation)
 
@@ -364,12 +365,12 @@ def process_chat_message(question, conversation_id):
             "$push": {
                 "history": {
                     "$each": [
-                        {"role": "user", "content": question, "timestamp": datetime.datetime.utcnow()},
-                        {"role": "assistant", "content": response, "timestamp": datetime.datetime.utcnow()}
+                        {"role": "user", "content": question, "timestamp": datetime.utcnow()},
+                        {"role": "assistant", "content": response, "timestamp": datetime.utcnow()}
                     ]
                 }
             },
-            "$set": {"updated_at": datetime.datetime.utcnow()}
+            "$set": {"updated_at": datetime.utcnow()}
         }
         
         conversations_collection.update_one(
@@ -529,9 +530,7 @@ def doctors():
         return jsonify({"success": False, "message": "An error occurred"}), 500
     
 appointments_collection = db['appointments']
-# Add these imports at the top of your Flask app
-from bson import ObjectId
-from datetime import datetime, timedelta
+
 @app.route('/appointments', methods=['GET', 'POST'])
 def handle_appointments():
     if request.method == 'GET':
