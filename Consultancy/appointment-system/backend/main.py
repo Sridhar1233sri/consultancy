@@ -27,7 +27,7 @@ db = client['Consultancy']
 users_collection = db['users']
 doctors_collection = db['doctors']
 conversations_collection = db['conversations']
-
+appointments_collection = db['appointments']
 # Groq client
 groq_client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
 
@@ -72,11 +72,12 @@ def classify_intent(text):
         prompt = f"""Classify the following user message into one of these categories:
         - greeting: for greetings like hello, hi, etc.
         - doctor_query: for questions about doctors, appointments, specialists
+        - appointment_query: for questions about existing appointments or booking new ones
         - general_query: for all other healthcare questions
 
         User message: "{text}"
 
-        Return only the category name (greeting, doctor_query, or general_query)."""
+        Return only the category name (greeting, doctor_query, appointment_query, or general_query)."""
         
         completion = groq_client.chat.completions.create(
             model="mistral-saba-24b",
@@ -86,7 +87,7 @@ def classify_intent(text):
         )
         
         response = completion.choices[0].message.content.lower().strip()
-        valid_intents = ["greeting", "doctor_query", "general_query"]
+        valid_intents = ["greeting", "doctor_query", "appointment_query", "general_query"]
         print(f"Classified intent: {response}")
         return response if response in valid_intents else "general_query"
     
@@ -96,20 +97,11 @@ def classify_intent(text):
             return "greeting"
         elif any(word in text.lower() for word in ["doctor", "specialist", "appointment"]):
             return "doctor_query"
+        elif any(word in text.lower() for word in ["book", "appointment", "schedule", "availability"]):
+            return "appointment_query"
         return "general_query"
 
-""" def get_doctor_data(query):
-    doctors = list(doctors_collection.find({
-        "$or": [
-            {"name": {"$regex": query, "$options": "i"}},
-            {"speciality": {"$regex": query, "$options": "i"}},
-            {"hospital": {"$regex": query, "$options": "i"}},
-            {"availability.days": {"$regex": query, "$options": "i"}},
-            {"availability.time": {"$regex": query, "$options": "i"}},
-        ]
-    }, {'_id': 0}))
-    print(doctors)
-    return doctors """
+
 def get_doctor_data(query):
     """Enhanced doctor search with better name matching"""
     try:
@@ -176,6 +168,147 @@ def get_doctor_data(query):
     except Exception as e:
         print(f"Error in doctor search: {str(e)}")
         return []
+    
+def check_doctor_availability(doctor_id, date, time):
+    """Check if a doctor is available at a specific date and time"""
+    try:
+        # Parse the input date and time
+        appointment_date = datetime.strptime(date, '%Y-%m-%d').date()
+        start_time = datetime.strptime(time, '%H:%M').time()
+        start_datetime = datetime.combine(appointment_date, start_time)
+        end_datetime = start_datetime + timedelta(hours=1)
+        
+        # Check for overlapping appointments
+        existing = appointments_collection.find_one({
+            "doctorId": doctor_id,
+            "date": date,
+            "$expr": {
+                "$and": [
+                    {
+                        "$lt": [
+                            {"$dateFromString": {
+                                "dateString": {"$concat": ["$date", "T", "$time", ":00"]},
+                                "format": "%Y-%m-%dT%H:%M:%S"
+                            }},
+                            end_datetime
+                        ]
+                    },
+                    {
+                        "$gt": [
+                            {
+                                "$add": [
+                                    {"$dateFromString": {
+                                        "dateString": {"$concat": ["$date", "T", "$time", ":00"]},
+                                        "format": "%Y-%m-%dT%H:%M:%S"
+                                    }},
+                                    3600000  # Add 1 hour in milliseconds
+                                ]
+                            },
+                            start_datetime
+                        ]
+                    }
+                ]
+            }
+        })
+        
+        return existing is None
+    
+    except Exception as e:
+        print(f"Error checking availability: {str(e)}")
+        return False
+    
+def get_doctor_appointments(doctor_id, date=None):
+    """Get all appointments for a doctor, optionally filtered by date"""
+    query = {"doctorId": doctor_id}
+    if date:
+        query["date"] = date
+    
+    appointments = list(appointments_collection.find(query, {
+        "_id": 0,
+        "doctorId": 1,
+        "doctorName": 1,
+        "doctorSpeciality": 1,
+        "doctorHospital": 1,
+        "date": 1,
+        "time": 1,
+        "startDateTime": 1,
+        "endDateTime": 1
+    }))
+    
+    return appointments
+
+def generate_appointment_response(question, conversation_id):
+    """Generate response for appointment-related queries"""
+    try:
+        # First extract doctor name and date/time from the question
+        prompt_extract = f"""Extract the following information from the user's question:
+        - doctor_name: The name of the doctor (or empty if not mentioned)
+        - date: The date in YYYY-MM-DD format (or empty if not mentioned)
+        - time: The time in HH:MM format (or empty if not mentioned)
+        
+        Return ONLY a JSON object with these three fields. Do not include any other text.
+        
+        User question: "{question}"
+        """
+        
+        completion = groq_client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[{"role": "user", "content": prompt_extract}],
+            temperature=0.1,
+            max_tokens=100,
+            response_format={"type": "json_object"}
+        )
+        
+        extracted = json.loads(completion.choices[0].message.content)
+        doctor_name = extracted.get("doctor_name", "").strip()
+        date = extracted.get("date", "").strip()
+        time = extracted.get("time", "").strip()
+        
+        print(f"Extracted details - Doctor: {doctor_name}, Date: {date}, Time: {time}")
+        
+        # If doctor name is not provided, ask for it
+        if not doctor_name:
+            return "Could you please specify which doctor you're asking about?"
+        
+        # Search for the doctor
+        doctors = get_doctor_data(doctor_name)
+        if not doctors:
+            return "I couldn't find that doctor in our system. Please check the name and try again."
+        
+        doctor = doctors[0]  # Take the first matching doctor
+        
+        # If date or time is not provided, ask for it
+        if not date or not time:
+            if not date and not time:
+                return f"Dr. {doctor['name']} is available on {doctor.get('availability', {}).get('days', 'weekdays')}. When would you like to check availability?"
+            elif not date:
+                return f"Please specify the date you'd like to check for Dr. {doctor['name']} (e.g., YYYY-MM-DD)."
+            else:
+                return f"Please specify the time you'd like to check for Dr. {doctor['name']} on {date} (e.g., HH:MM)."
+        
+        # Check availability
+        is_available = check_doctor_availability(doctor['id'], date, time)
+        
+        if is_available:
+            return f"Dr. {doctor['name']} is available on {date} at {time}. Would you like to book this appointment?"
+        else:
+            # Get doctor's existing appointments to suggest alternatives
+            appointments = get_doctor_appointments(doctor['id'], date)
+            booked_slots = [appt['time'] for appt in appointments]
+            
+            # Generate suggested times (same date, different times)
+            all_slots = [f"{hour:02d}:00" for hour in range(9, 18)]
+            available_slots = [slot for slot in all_slots if slot not in booked_slots]
+            
+            if available_slots:
+                suggestions = ", ".join(available_slots[:3])  # Show first 3 available slots
+                return f"Dr. {doctor['name']} already has an appointment at {time} on {date}. Available times that day include: {suggestions}. Would you like one of these instead?"
+            else:
+                return f"Dr. {doctor['name']} is fully booked on {date}. Please try another day."
+    
+    except Exception as e:
+        print(f"Error generating appointment response: {str(e)}")
+        return "I encountered an error checking the appointment. Please try again with specific details about the doctor and time."
 
 def generate_doctor_response(question, doctors):
     print("doctor queries")
@@ -293,6 +426,8 @@ def chat():
         if intent == "doctor_query":
             doctors = get_doctor_data(question)
             response = generate_doctor_response(question, doctors)
+        elif intent == "appointment_query":
+            response = generate_appointment_response(question, conversation_id)
         else:
             # Format history for context (last 4 messages)
             history_context = "\n".join(
@@ -336,6 +471,7 @@ def chat():
     except Exception as e:
         print(f"Unexpected error: {str(e)}")
         return jsonify({"success": False, "message": "An unexpected error occurred"}), 500
+
 
 def process_chat_message(question, conversation_id):
     try:
